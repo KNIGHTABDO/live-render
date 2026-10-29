@@ -63,7 +63,8 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
+          sudo apt-get install -y -qq ffmpeg python3-numpy
+          python3 -c "import numpy; print('numpy OK')"
 
       - name: Download all chunks
         uses: actions/download-artifact@v4
@@ -141,7 +142,14 @@ jobs:
 
           ls -lh final/master_loop.mp4
 
+      - name: Upload Master Loop Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-loop
+          path: final/master_loop.mp4
+
       - name: Create Release with master_loop.mp4
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
