@@ -45,11 +45,13 @@ jobs:
             -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -an \
             chunks/chunk_${CHUNK}.mp4
 
+          ls -lh chunks/chunk_${CHUNK}.mp4
+
       - name: Upload Chunk Artifact
         uses: actions/upload-artifact@v4
         with:
           name: chunk-${{ matrix.chunk }}
-          path: chunks/chunk_${CHUNK}.mp4
+          path: chunks/chunk_${{ matrix.chunk }}.mp4
 
   assemble-and-mux:
     needs: render-chunk
@@ -122,6 +124,10 @@ jobs:
           > list.txt
           for i in $(seq 0 11); do
             f=$(find all_chunks -name "chunk_${i}.mp4")
+            if [ -z "$f" ]; then
+              echo "Error: chunk_${i}.mp4 not found!"
+              exit 1
+            fi
             echo "file '$PWD/$f'" >> list.txt
           done
           cat list.txt
