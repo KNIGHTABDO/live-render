@@ -1,0 +1,164 @@
+name: Render 60-Minute Master Loop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  render-chunk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    name: Chunk ${{ matrix.chunk }} (5min)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core fonts-noto-core
+
+      - name: Render 5-Minute Chunk with Pomodoro Overlay
+        run: |
+          mkdir -p chunks
+          CHUNK=${{ matrix.chunk }}
+          CHUNK_START=$(( CHUNK * 300 ))
+          CHUNK_DUR=300
+
+          echo "Rendering Chunk $CHUNK from t=${CHUNK_START}s to t=$((CHUNK_START + CHUNK_DUR))s..."
+
+          FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+          if [ ! -f "$FONT" ]; then
+            FONT=$(fc-match -f "%{file}" "sans-serif")
+          fi
+          echo "Using font: $FONT"
+
+          # Pomodoro Logic:
+          # Focus (0 to 3000s): Countdown 50:00 -> 00:00, white@0.90, text "F O C U S   S E S S I O N" white@0.70
+          # Break (3000 to 3600s): Countdown 10:00 -> 00:00, #F3D078@0.92, text "P A U S E   •   R E P O S" #F3D078@0.75
+          # Global time T = CHUNK_START + t
+
+          FILTER="drawtext=fontfile='$FONT':fontsize=64:fontcolor_expr='%{eif\\:if(lt(${CHUNK_START}+t\\,3000)\\,0xFFFFFFE6\\,0xF3D078EB)\\:x}':x=w-tw-68:y=42:text='%{eif\\:if(lt(${CHUNK_START}+t\\,3000)\\,(3000-(${CHUNK_START}+t))/60\\,(3600-(${CHUNK_START}+t))/60)\\:d\\:2}\\:%{eif\\:mod(if(lt(${CHUNK_START}+t\\,3000)\\,3000-(${CHUNK_START}+t)\\,3600-(${CHUNK_START}+t))\\,60)\\:d\\:2}',drawtext=fontfile='$FONT':fontsize=16:fontcolor_expr='%{eif\\:if(lt(${CHUNK_START}+t\\,3000)\\,0xFFFFFFB3\\,0xF3D078BF)\\:x}':x=w-tw-68:y=116:text_expr='%{eif\\:if(lt(${CHUNK_START}+t\\,3000)\\,1\\,0)\\:d}'[tmp];[tmp]drawtext=fontfile='$FONT':fontsize=16:fontcolor=white@0.70:x=w-tw-68:y=116:text='F O C U S   S E S S I O N':enable='lt(${CHUNK_START}+t,3000)',drawtext=fontfile='$FONT':fontsize=16:fontcolor=#F3D078@0.75:x=w-tw-68:y=116:text='P A U S E   •   R E P O S':enable='gte(${CHUNK_START}+t,3000)'"
+
+          ffmpeg -y -stream_loop 99 -i hyperframes_loop.mp4 -t $CHUNK_DUR \
+            -vf "$FILTER" \
+            -c:v libx264 -preset veryfast -b:v 4500k -maxrate 4500k -bufsize 9000k -pix_fmt yuv420p \
+            -r 30 -g 60 -keyint_min 60 -sc_threshold 0 -an \
+            chunks/chunk_${CHUNK}.mp4
+
+      - name: Upload Chunk Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.chunk }}
+          path: chunks/chunk_${CHUNK}.mp4
+
+  assemble-and-mux:
+    needs: render-chunk
+    runs-on: ubuntu-latest
+    name: Assemble 60m Master + Audio Mux
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg sox
+
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          path: all_chunks
+
+      - name: Generate 60-Minute Lo-Fi Rain & Bell Audio
+        run: |
+          echo "Generating 60-minute synthetic high-quality audio track..."
+          # Soft night rain + warm ambient pad + Tibetan bowl chime at t=0 and t=3000
+          python3 -c "
+          import numpy as np
+          import wave
+          import struct
+
+          sample_rate = 44100
+          duration = 3600 # 60 minutes
+          total_samples = sample_rate * duration
+
+          print('Synthesizing 60m audio track...')
+          # Chunked generation to keep runner RAM low
+          chunk_len = sample_rate * 60 # 1 minute chunks
+          
+          with wave.open('ambient_audio.wav', 'w') as wav:
+              wav.setnchannels(2)
+              wav.setsampwidth(2)
+              wav.setframerate(sample_rate)
+              
+              # Warm chord frequencies (Lo-Fi Fmaj7 / Dm9: F3=174.61, A3=220.0, C4=261.63, E4=329.63)
+              freqs = [174.61, 220.0, 261.63, 329.63]
+              
+              for m in range(60):
+                  t0 = m * 60
+                  t = np.linspace(t0, t0 + 60, chunk_len, endpoint=False)
+                  
+                  # Rain noise (pink/brown filtered noise)
+                  white = np.random.normal(0, 0.08, chunk_len)
+                  rain = np.convolve(white, np.ones(12)/12, mode='same')
+                  
+                  # Warm swelling pad
+                  pad = np.zeros(chunk_len)
+                  for f in freqs:
+                      lfo = 0.5 + 0.5 * np.sin(2 * np.pi * 0.05 * t)
+                      pad += 0.04 * np.sin(2 * np.pi * f * t) * lfo
+                  
+                  # Singing bowl chime at t=0 and t=3000
+                  chime = np.zeros(chunk_len)
+                  for strike in [0, 3000]:
+                      if t0 <= strike < t0 + 60:
+                          delta = t - strike
+                          mask = delta >= 0
+                          # Tibetan bowl fundamentals and harmonics
+                          bowl = (np.sin(2 * np.pi * 432 * delta) * 0.25 + 
+                                  np.sin(2 * np.pi * 864 * delta) * 0.12 + 
+                                  np.sin(2 * np.pi * 1296 * delta) * 0.05)
+                          decay = np.exp(-delta / 4.5)
+                          chime += bowl * decay * mask
+                  
+                  left = np.clip(rain + pad + chime, -0.95, 0.95)
+                  right = np.clip(rain * 0.95 + pad + chime, -0.95, 0.95)
+                  
+                  # Interleave 16-bit PCM
+                  interleaved = np.empty((chunk_len * 2,), dtype=np.int16)
+                  interleaved[0::2] = (left * 32767).astype(np.int16)
+                  interleaved[1::2] = (right * 32767).astype(np.int16)
+                  wav.writeframes(interleaved.tobytes())
+          "
+
+      - name: Concatenate Chunks & Mux Audio
+        run: |
+          mkdir -p final
+          > list.txt
+          for i in $(seq 0 11); do
+            f=$(find all_chunks -name "chunk_${i}.mp4")
+            echo "file '$PWD/$f'" >> list.txt
+          done
+          cat list.txt
+
+          echo "Concatenating 12 chunks (total 60m) and muxing AAC audio..."
+          ffmpeg -y -f concat -safe 0 -i list.txt -i ambient_audio.wav \
+            -c:v copy \
+            -c:a aac -b:a 160k -ar 44100 \
+            -movflags +faststart \
+            final/master_loop.mp4
+
+          ls -lh final/master_loop.mp4
+
+      - name: Create Release with master_loop.mp4
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" final/master_loop.mp4 \
+            --title "Master Loop 60m ($TAG)" \
+            --notes "Broadcast-ready 60-minute Pomodoro master loop."
